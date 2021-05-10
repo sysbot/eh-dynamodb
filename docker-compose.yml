@@ -1,0 +1,17 @@
+version: "3.4"
+
+services:
+  golang:
+    image: golang:stretch
+    depends_on:
+      - dynamodb
+    environment:
+      DYNAMODB_HOST: "http://dynamodb:8000"
+      AWS_ACCESS_KEY_ID: "fakeKeyId"
+      AWS_SECRET_ACCESS_KEY: "fakeSecret"
+    volumes:
+      - .:/eventhorizon
+    working_dir: /eventhorizon
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
