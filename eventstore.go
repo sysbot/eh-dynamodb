@@ -54,14 +54,27 @@ func (c *EventStoreConfig) provideDefaults() {
 		c.TablePrefix = "eventhorizonEvents"
 	}
 	if c.Region == "" {
-		c.Region = "us-east-1"
+		c.Region = "us-west-2"
+	}
+}
+
+// Option is an option setter used to configure creation.
+type Option func(*EventStore) error
+
+// WithEventHandler adds an event handler that will be called when saving events.
+// An example would be to add an event bus to publish events.
+func WithEventHandler(h eh.EventHandler) Option {
+	return func(s *EventStore) error {
+		s.eventHandler = h
+		return nil
 	}
 }
 
 // EventStore implements an EventStore for DynamoDB.
 type EventStore struct {
-	service *dynamo.DB
-	config  *EventStoreConfig
+	service      *dynamo.DB
+	config       *EventStoreConfig
+	eventHandler eh.EventHandler
 }
 
 // NewEventStore creates a new EventStore.
@@ -145,6 +158,20 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 				BaseErr:   err,
 				Err:       err,
 				Namespace: eh.NamespaceFromContext(ctx),
+			}
+		}
+	}
+
+	// Let the optional event handler handle the events. Aborts the transaction
+	// in case of error.
+	if s.eventHandler != nil {
+		for _, e := range events {
+			if err := s.eventHandler.HandleEvent(ctx, e); err != nil {
+				return eh.EventStoreError{
+					Err:       eh.ErrCouldNotHandleEvents,
+					BaseErr:   err,
+					Namespace: eh.NamespaceFromContext(ctx),
+				}
 			}
 		}
 	}
@@ -330,6 +357,7 @@ type dbEvent struct {
 	data          eh.EventData
 	Timestamp     time.Time
 	AggregateType eh.AggregateType
+	metadata      map[string]interface{}
 }
 
 // newDBEvent returns a new dbEvent for an event.
@@ -355,6 +383,7 @@ func newDBEvent(ctx context.Context, event eh.Event) (*dbEvent, error) {
 		AggregateType: event.AggregateType(),
 		AggregateID:   event.AggregateID(),
 		Version:       event.Version(),
+		metadata:      event.Metadata(),
 	}, nil
 }
 
@@ -362,6 +391,11 @@ func newDBEvent(ctx context.Context, event eh.Event) (*dbEvent, error) {
 // interface for a DynamoDB event store.
 type event struct {
 	dbEvent
+}
+
+// Metadata implements the Metadata method of the Event interface.
+func (e event) Metadata() map[string]interface{} {
+	return e.metadata
 }
 
 // EventType implements the EventType method of the eventhorizon.Event interface.
