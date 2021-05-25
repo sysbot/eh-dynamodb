@@ -78,7 +78,7 @@ type EventStore struct {
 }
 
 // NewEventStore creates a new EventStore.
-func NewEventStore(config *EventStoreConfig) (*EventStore, error) {
+func NewEventStore(config *EventStoreConfig, options ...Option) (*EventStore, error) {
 	config.provideDefaults()
 
 	awsConfig := &aws.Config{
@@ -91,18 +91,26 @@ func NewEventStore(config *EventStoreConfig) (*EventStore, error) {
 		return nil, err
 	}
 	db := dynamo.New(session)
-	return NewEventStoreWithDB(config, db), nil
-}
 
-// NewEventStoreWithDB creates a new EventStore with DB
-func NewEventStoreWithDB(config *EventStoreConfig, db *dynamo.DB) *EventStore {
 	s := &EventStore{
 		service: db,
 		config:  config,
 	}
 
-	return s
+	for _, option := range options {
+		if err := option(s); err != nil {
+			return nil, fmt.Errorf("error while applying option: %v", err)
+		}
+	}
+
+	return s, nil
 }
+
+// // NewEventStoreWithDB creates a new EventStore with DB
+// func NewEventStoreWithDB(config *EventStoreConfig, db *dynamo.DB) *EventStore {
+
+// 	return s
+// }
 
 // Save implements the Save method of the eventhorizon.EventStore interface.
 func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersion int) error {
