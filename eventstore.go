@@ -42,20 +42,12 @@ var ErrCouldNotUnmarshalEvent = errors.New("could not unmarshal event")
 // ErrCouldNotSaveAggregate is when an aggregate could not be saved.
 var ErrCouldNotSaveAggregate = errors.New("could not save aggregate")
 
-// EventStoreConfig is a config for the DynamoDB event store.
-type EventStoreConfig struct {
-	TablePrefix string
-	Region      string
-	Endpoint    string
-}
-
-func (c *EventStoreConfig) provideDefaults() {
-	if c.TablePrefix == "" {
-		c.TablePrefix = "eventhorizonEvents"
-	}
-	if c.Region == "" {
-		c.Region = "us-west-2"
-	}
+// EventStore implements an EventStore for DynamoDB.
+type EventStore struct {
+	tablePrefix  string
+	service      *dynamo.DB
+	eventHandler eh.EventHandler
+	tableName    func(context.Context) string
 }
 
 // Option is an option setter used to configure creation.
@@ -70,31 +62,34 @@ func WithEventHandler(h eh.EventHandler) Option {
 	}
 }
 
-// EventStore implements an EventStore for DynamoDB.
-type EventStore struct {
-	service      *dynamo.DB
-	config       *EventStoreConfig
-	eventHandler eh.EventHandler
+// WithDBName uses a custom DB name function.
+func WithDynamoDB(sess *session.Session) Option {
+	return func(r *EventStore) error {
+		r.service = dynamo.New(sess)
+		return nil
+	}
 }
 
 // NewEventStore creates a new EventStore.
-func NewEventStore(config *EventStoreConfig, options ...Option) (*EventStore, error) {
-	config.provideDefaults()
-
+func NewEventStore(tablePrefix string, options ...Option) (*EventStore, error) {
 	awsConfig := &aws.Config{
-		Region:   aws.String(config.Region),
-		Endpoint: aws.String(config.Endpoint),
+		Region:   aws.String("us-west-2"),
+		Endpoint: aws.String("http://localhost:8000"),
 	}
 
-	session, err := session.NewSession(awsConfig)
+	sess, err := session.NewSession(awsConfig)
 	if err != nil {
-		return nil, err
+		return nil, ErrCouldNotDialDB
 	}
-	db := dynamo.New(session)
 
 	s := &EventStore{
-		service: db,
-		config:  config,
+		tablePrefix: "eventhorizonEvents",
+		service:     dynamo.New(sess),
+	}
+
+	s.tableName = func(ctx context.Context) string {
+		ns := eh.NamespaceFromContext(ctx)
+		return tablePrefix + "_" + ns
 	}
 
 	for _, option := range options {
@@ -105,12 +100,6 @@ func NewEventStore(config *EventStoreConfig, options ...Option) (*EventStore, er
 
 	return s, nil
 }
-
-// // NewEventStoreWithDB creates a new EventStore with DB
-// func NewEventStoreWithDB(config *EventStoreConfig, db *dynamo.DB) *EventStore {
-
-// 	return s
-// }
 
 // Save implements the Save method of the eventhorizon.EventStore interface.
 func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersion int) error {
@@ -125,7 +114,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 	// original aggregate version.
 	aggregateID := events[0].AggregateID()
 	version := originalVersion
-	table := s.service.Table(s.TableName(ctx))
+	table := s.service.Table(s.tableName(ctx))
 	for _, event := range events {
 		// Only accept events belonging to the same aggregate.
 		if event.AggregateID() != aggregateID {
@@ -189,7 +178,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
-	table := s.service.Table(s.TableName(ctx))
+	table := s.service.Table(s.tableName(ctx))
 
 	var dbEvents []dbEvent
 	err := table.Get("AggregateID", id.String()).Consistent(true).All(&dbEvents)
@@ -208,7 +197,7 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 
 // LoadAll will load all the events from the event store (useful to replay events)
 func (s *EventStore) LoadAll(ctx context.Context) ([]eh.Event, error) {
-	table := s.service.Table(s.TableName(ctx))
+	table := s.service.Table(s.tableName(ctx))
 
 	var dbEvents []dbEvent
 	err := table.Scan().Consistent(true).All(&dbEvents)
@@ -226,6 +215,7 @@ func (s *EventStore) LoadAll(ctx context.Context) ([]eh.Event, error) {
 func (s *EventStore) buildEvents(ctx context.Context, dbEvents []dbEvent) ([]eh.Event, error) {
 	events := make([]eh.Event, len(dbEvents))
 	for i, dbEvent := range dbEvents {
+
 		// Create an event of the correct type.
 		if data, err := eh.CreateEventData(dbEvent.EventType); err == nil {
 			// Manually decode the raw event.
@@ -250,7 +240,7 @@ func (s *EventStore) buildEvents(ctx context.Context, dbEvents []dbEvent) ([]eh.
 
 // Replace implements the Replace method of the eventhorizon.EventStore interface.
 func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
-	table := s.service.Table(s.TableName(ctx))
+	table := s.service.Table(s.tableName(ctx))
 
 	count, err := table.Get("AggregateID", event.AggregateID().String()).Consistent(true).Count()
 	if err != nil {
@@ -285,7 +275,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 
 // RenameEvent implements the RenameEvent method of the eventhorizon.EventStore interface.
 func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) error {
-	table := s.service.Table(s.TableName(ctx))
+	table := s.service.Table(s.tableName(ctx))
 
 	var dbEvents []dbEvent
 	err := table.Scan().Filter("EventType = ?", from).Consistent(true).All(&dbEvents)
@@ -312,12 +302,12 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 
 // CreateTable creates the table if it is not already existing and correct.
 func (s *EventStore) CreateTable(ctx context.Context) error {
-	if err := s.service.CreateTable(s.TableName(ctx), dbEvent{}).Run(); err != nil {
+	if err := s.service.CreateTable(s.tableName(ctx), dbEvent{}).Run(); err != nil {
 		return err
 	}
 
 	describeParams := &dynamodb.DescribeTableInput{
-		TableName: aws.String(s.TableName(ctx)),
+		TableName: aws.String(s.tableName(ctx)),
 	}
 	if err := s.service.Client().WaitUntilTableExists(describeParams); err != nil {
 		return err
@@ -328,7 +318,7 @@ func (s *EventStore) CreateTable(ctx context.Context) error {
 
 // DeleteTable deletes the event table.
 func (s *EventStore) DeleteTable(ctx context.Context) error {
-	table := s.service.Table(s.TableName(ctx))
+	table := s.service.Table(s.tableName(ctx))
 	err := table.DeleteTable().Run()
 	if err != nil {
 		if err, ok := err.(awserr.RequestFailure); ok && err.Code() == "ResourceNotFoundException" {
@@ -338,20 +328,13 @@ func (s *EventStore) DeleteTable(ctx context.Context) error {
 	}
 
 	describeParams := &dynamodb.DescribeTableInput{
-		TableName: aws.String(s.TableName(ctx)),
+		TableName: aws.String(s.tableName(ctx)),
 	}
 	if err := s.service.Client().WaitUntilTableNotExists(describeParams); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// TableName appends the namespace, if one is set, to the table prefix to
-// get the name of the table to use.
-func (s *EventStore) TableName(ctx context.Context) string {
-	ns := eh.NamespaceFromContext(ctx)
-	return s.config.TablePrefix + "_" + ns
 }
 
 // dbEvent is the internal event record for the DynamoDB event store used
@@ -365,7 +348,7 @@ type dbEvent struct {
 	data          eh.EventData
 	Timestamp     time.Time
 	AggregateType eh.AggregateType
-	metadata      map[string]interface{}
+	Metadata      map[string]interface{}
 }
 
 // newDBEvent returns a new dbEvent for an event.
@@ -391,7 +374,7 @@ func newDBEvent(ctx context.Context, event eh.Event) (*dbEvent, error) {
 		AggregateType: event.AggregateType(),
 		AggregateID:   event.AggregateID(),
 		Version:       event.Version(),
-		metadata:      event.Metadata(),
+		Metadata:      event.Metadata(),
 	}, nil
 }
 
@@ -403,7 +386,7 @@ type event struct {
 
 // Metadata implements the Metadata method of the Event interface.
 func (e event) Metadata() map[string]interface{} {
-	return e.metadata
+	return e.dbEvent.Metadata
 }
 
 // EventType implements the EventType method of the eventhorizon.Event interface.

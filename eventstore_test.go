@@ -16,10 +16,11 @@ package dynamodb
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/google/uuid"
 
 	"github.com/looplab/eventhorizon/mocks"
@@ -38,18 +39,27 @@ type EventStoreTestSuite struct {
 	store *EventStore
 }
 
-// SetupTestSuite will create the store and dynamo table
+// SetupTest will create the store and dynamo table
 func (suite *EventStoreTestSuite) SetupTest() {
-	config := &EventStoreConfig{Endpoint: os.Getenv("DYNAMODB_HOST")}
+	awsConfig := &aws.Config{
+		Region:   aws.String("us-west-2"),
+		Endpoint: aws.String("http://localhost:8000"),
+		// Endpoint: aws.String(os.Getenv("DYNAMODB_HOST")),
+	}
 
-	var err error
-	suite.store, err = NewEventStore(config)
+	awsSession, err := session.NewSession(awsConfig)
+	assert.Nil(suite.T(), err, "there should be no error")
+
+	suite.store, err = NewEventStore(
+		"test",
+		WithDynamoDB(awsSession),
+	)
 	assert.Nil(suite.T(), err, "there should be no error")
 	assert.NotNil(suite.T(), suite.store, "there should be a store")
 
-	suite.ctx = eh.NewContextWithNamespace(context.Background(), "ns")
-
 	assert.Nil(suite.T(), suite.store.CreateTable(context.Background()), "could not create table")
+
+	suite.ctx = eh.NewContextWithNamespace(context.Background(), "ns")
 	assert.Nil(suite.T(), suite.store.CreateTable(suite.ctx), "could not create table")
 }
 

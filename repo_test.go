@@ -16,7 +16,6 @@ package dynamodb
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -35,51 +34,36 @@ import (
 // RepoTestSuite is intended to store values shared by multiple test and manage the setup/teardown
 type RepoTestSuite struct {
 	suite.Suite
-	db   *dynamo.DB
-	conf *RepoConfig
 	repo *Repo
+	db   *dynamo.DB
 }
 
 // SetupSuite will be run once, at the very start of the testing suite
 func (suite *RepoTestSuite) SetupSuite() {
-	conf := suite.getRepoConfig()
-	db := suite.getDynamoDB(conf)
-
-	suite.conf = conf
-	suite.db = db
-	suite.repo = suite.getRepo(suite.conf)
-}
-
-func (suite *RepoTestSuite) getDynamoDB(conf *RepoConfig) *dynamo.DB {
 	awsConf := &aws.Config{
-		Region:   aws.String("us-east-1"),
-		Endpoint: aws.String(conf.Endpoint),
+		Region: aws.String("us-east-1"),
+		//Endpoint: aws.String(os.Getenv("DYNAMODB_HOST")),
+		Endpoint: aws.String("http://localhost:8000"),
 	}
 	awsSession, err := session.NewSession(awsConf)
 	if err != nil {
 		suite.T().Fatal("error setting up DB:", err)
 	}
-	return dynamo.New(awsSession)
-}
 
-func (suite *RepoTestSuite) getRepo(conf *RepoConfig) *Repo {
-	testModel := &TestModel{}
+	suite.db = dynamo.New(awsSession)
 
-	if err := suite.db.CreateTable(suite.conf.TableName, testModel).OnDemand(true).Run(); err != nil {
-		suite.T().Fatal("could not create table:", err)
-	}
-
-	repo, err := NewRepo(conf)
-	if err != nil || repo == nil {
+	tablePrefix := "eventhorizonTest_" + uuid.New().String()
+	suite.repo, err = NewRepo(
+		tablePrefix,
+		WithRepoDynamoDB(awsSession),
+		WithRepoEntityFactoryFunc(func() eh.Entity { return &TestModel{} }),
+	)
+	if err != nil || suite.repo == nil {
 		suite.T().Fatal("error creating repo:", err)
 	}
-	return repo
-}
 
-func (suite *RepoTestSuite) getRepoConfig() *RepoConfig {
-	return &RepoConfig{
-		TableName: "eventhorizonTest_" + uuid.New().String(),
-		Endpoint:  os.Getenv("DYNAMODB_HOST"),
+	if err := suite.repo.CreateTable(context.Background()); err != nil {
+		suite.T().Fatal("could not create table:", err)
 	}
 }
 
@@ -134,6 +118,10 @@ func (suite *RepoTestSuite) TestSaveAndFindWithFilter() {
 }
 
 func (suite *RepoTestSuite) TestSaveAndFindUsingIndex() {
+	// ctx, _ := context.WithCancel(
+	// // eh.NewContextWithNamespace(context.Background(), "ns"),
+	// )
+
 	index := dynamo.Index{
 		Name:           "testIndex",
 		HashKey:        "FilterableID",
@@ -142,10 +130,10 @@ func (suite *RepoTestSuite) TestSaveAndFindUsingIndex() {
 		RangeKeyType:   dynamo.StringType,
 		ProjectionType: dynamodb.ProjectionTypeAll,
 	}
-	if _, err := suite.db.Table(suite.conf.TableName).UpdateTable().CreateIndex(index).OnDemand(true).Run(); err != nil {
+	if _, err := suite.db.Table(suite.repo.tableName(context.Background())).UpdateTable().CreateIndex(index).OnDemand(true).Run(); err != nil {
 		suite.T().Fatal("could not create index:", err)
 	}
-	defer suite.db.Table(suite.conf.TableName).UpdateTable().DeleteIndex(index.Name).Run()
+	defer suite.db.Table(suite.repo.tableName(context.Background())).UpdateTable().DeleteIndex(index.Name).Run()
 
 	_ = suite.repo.Save(context.Background(), &TestModel{ID: uuid.New(), Content: "testContent", FilterableID: 123, FilterableSortKey: "test"})
 	_ = suite.repo.Save(context.Background(), &TestModel{ID: uuid.New(), Content: "testContent", FilterableID: 123, FilterableSortKey: "test"})
