@@ -1,0 +1,20 @@
+name: eh-dynamodb test on pr
+
+on:
+  pull_request:
+    branches:
+    - mater
+
+jobs:
+  docker:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v1
+
+    - name: Start containers
+      run: make test_docker
+
+      
