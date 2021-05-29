@@ -17,9 +17,12 @@ package dynamodb
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/google/uuid"
 	"github.com/guregu/dynamo"
 	eh "github.com/looplab/eventhorizon"
@@ -31,50 +34,107 @@ var ErrCouldNotDialDB = errors.New("could not dial database")
 // ErrModelNotSet is when an model factory is not set on the Repo.
 var ErrModelNotSet = errors.New("model not set")
 
-// RepoConfig is a config for the DynamoDB event store.
-type RepoConfig struct {
-	TableName string
-	Region    string
-	Endpoint  string
+// Repo implements a DynamoDB repository for entities.
+type Repo struct {
+	tablePrefix string
+	service     *dynamo.DB
+	factoryFn   func() eh.Entity
+	tableName   func(context.Context) string
 }
 
-func (c *RepoConfig) provideDefaults() {
-	if c.Region == "" {
-		c.Region = "us-east-1"
+// Option is an option setter used to configure creation.
+type OptionRepo func(*Repo) error
+
+// WithPrefixAsDBName uses only the prefix as DB name, without namespace support.
+func WithRepoPrefixAsTableName() OptionRepo {
+	return func(r *Repo) error {
+		r.tableName = func(context.Context) string {
+			return r.tablePrefix
+		}
+		return nil
 	}
 }
 
-// Repo implements a DynamoDB repository for entities.
-type Repo struct {
-	service   *dynamo.DB
-	config    *RepoConfig
-	factoryFn func() eh.Entity
+// WithDBName uses a custom DB name function.
+func WithRepoTableName(tableName func(context.Context) string) OptionRepo {
+	return func(r *Repo) error {
+		r.tableName = tableName
+		return nil
+	}
+}
+
+// WithRepoDBName uses a custom DB name function.
+func WithRepoDynamoDB(sess *session.Session) OptionRepo {
+	return func(r *Repo) error {
+		r.service = dynamo.New(sess)
+		return nil
+	}
+}
+
+func WithRepoEntityFactoryFunc(f func() eh.Entity) OptionRepo {
+	return func(r *Repo) error {
+		r.factoryFn = f
+		return nil
+	}
 }
 
 // NewRepo creates a new Repo.
-func NewRepo(config *RepoConfig) (*Repo, error) {
-	config.provideDefaults()
+func NewRepo(tablePrefix string, options ...OptionRepo) (*Repo, error) {
 	awsConfig := &aws.Config{
-		Region:   aws.String(config.Region),
-		Endpoint: aws.String(config.Endpoint),
+		Region:   aws.String("us-west-2"),
+		Endpoint: aws.String("http://localhost:8000"),
 	}
 
 	sess, err := session.NewSession(awsConfig)
-	db := dynamo.New(sess)
-
 	if err != nil {
 		return nil, ErrCouldNotDialDB
 	}
 
-	return &Repo{
-		service: db,
-		config:  config,
-	}, nil
+	r := &Repo{
+		tablePrefix: tablePrefix,
+		service:     dynamo.New(sess),
+	}
+
+	r.tableName = func(ctx context.Context) string {
+		ns := eh.NamespaceFromContext(ctx)
+		return tablePrefix + "_" + ns
+	}
+
+	for _, option := range options {
+		if err := option(r); err != nil {
+			return nil, fmt.Errorf("error while applying option: %v", err)
+		}
+	}
+
+	return r, nil
 }
 
 // Parent implements the Parent method of the eventhorizon.ReadRepo interface.
 func (r *Repo) Parent() eh.ReadRepo {
 	return nil
+}
+
+func (r *Repo) CreateTable(ctx context.Context) error {
+	if r.service == nil {
+		return ErrCouldNotDialDB
+	}
+	if r.factoryFn == nil {
+		return ErrModelNotSet
+	}
+
+	if err := r.service.CreateTable(r.tableName(ctx), r.factoryFn()).Run(); err != nil {
+		return err
+	}
+
+	describeParams := &dynamodb.DescribeTableInput{
+		TableName: aws.String(r.tableName(ctx)),
+	}
+	if err := r.service.Client().WaitUntilTableExists(describeParams); err != nil {
+		return err
+	}
+
+	return nil
+
 }
 
 // Find implements the Find method of the eventhorizon.ReadRepo interface.
@@ -86,7 +146,7 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 		}
 	}
 
-	table := r.service.Table(r.config.TableName)
+	table := r.service.Table(r.tableName(ctx))
 	entity := r.factoryFn()
 
 	err := table.Get("ID", id.String()).Consistent(true).One(entity)
@@ -111,7 +171,7 @@ func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
 		}
 	}
 
-	table := r.service.Table(r.config.TableName)
+	table := r.service.Table(r.tableName(ctx))
 
 	iter := table.Scan().Consistent(true).Iter()
 	result := []eh.Entity{}
@@ -133,7 +193,7 @@ func (r *Repo) FindWithFilter(ctx context.Context, expr string, args ...interfac
 		}
 	}
 
-	table := r.service.Table(r.config.TableName)
+	table := r.service.Table(r.tableName(ctx))
 
 	iter := table.Scan().Filter(expr, args...).Consistent(true).Iter()
 	result := []eh.Entity{}
@@ -155,7 +215,7 @@ func (r *Repo) FindWithFilterUsingIndex(ctx context.Context, indexInput IndexInp
 		}
 	}
 
-	table := r.service.Table(r.config.TableName)
+	table := r.service.Table(r.tableName(ctx))
 
 	iter := table.Get(indexInput.PartitionKey, indexInput.PartitionKeyValue).
 		Range(indexInput.SortKey, dynamo.Equal, indexInput.SortKeyValue).
@@ -175,7 +235,7 @@ func (r *Repo) FindWithFilterUsingIndex(ctx context.Context, indexInput IndexInp
 
 // Save implements the Save method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
-	table := r.service.Table(r.config.TableName)
+	table := r.service.Table(r.tableName(ctx))
 
 	if entity.EntityID() == uuid.Nil {
 		return eh.RepoError{
@@ -186,6 +246,7 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 	}
 
 	if err := table.Put(entity).Run(); err != nil {
+		fmt.Println("save after", r.tableName(ctx), entity, entity.EntityID(), reflect.TypeOf(entity), err)
 		return eh.RepoError{
 			Err:       eh.ErrCouldNotSaveEntity,
 			BaseErr:   err,
@@ -198,7 +259,7 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 
 // Remove implements the Remove method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
-	table := r.service.Table(r.config.TableName)
+	table := r.service.Table(r.tableName(ctx))
 
 	if err := table.Delete("ID", id.String()).Run(); err != nil {
 		return eh.RepoError{
