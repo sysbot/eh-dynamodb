@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -246,7 +245,6 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 	}
 
 	if err := table.Put(entity).Run(); err != nil {
-		fmt.Println("save after", r.tableName(ctx), entity, entity.EntityID(), reflect.TypeOf(entity), err)
 		return eh.RepoError{
 			Err:       eh.ErrCouldNotSaveEntity,
 			BaseErr:   err,

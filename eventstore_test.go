@@ -99,14 +99,14 @@ func (suite *EventStoreTestSuite) TestLoadAll() {
 	assert.Nil(suite.T(), err)
 	assert.Len(suite.T(), events, 2)
 
-	// for i, event := range events {
-	// 	if err := mocks.CompareEvents(event, expectedEvents[i]); err != nil {
-	// 		suite.T().Error("the event was incorrect:", err)
-	// 	}
-	// 	if event.Version() != i+1 {
-	// 		suite.T().Error("the event version should be correct:", event, event.Version())
-	// 	}
-	// }
+	for i, event := range events {
+		if err := eh.CompareEvents(event, expectedEvents[i]); err != nil {
+			suite.T().Error("the event was incorrect:", err)
+		}
+		if event.Version() != i+1 {
+			suite.T().Error("the event version should be correct:", event, event.Version())
+		}
+	}
 }
 
 // TestSaveInvalidAggregateId will save an aggregate with an invalid event aggregate ID

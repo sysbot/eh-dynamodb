@@ -118,10 +118,6 @@ func (suite *RepoTestSuite) TestSaveAndFindWithFilter() {
 }
 
 func (suite *RepoTestSuite) TestSaveAndFindUsingIndex() {
-	// ctx, _ := context.WithCancel(
-	// // eh.NewContextWithNamespace(context.Background(), "ns"),
-	// )
-
 	index := dynamo.Index{
 		Name:           "testIndex",
 		HashKey:        "FilterableID",
