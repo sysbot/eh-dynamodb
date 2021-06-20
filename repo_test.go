@@ -35,13 +35,14 @@ import (
 type RepoTestSuite struct {
 	suite.Suite
 	repo *Repo
+	ctx  context.Context
 	db   *dynamo.DB
 }
 
 // SetupSuite will be run once, at the very start of the testing suite
 func (suite *RepoTestSuite) SetupSuite() {
 	awsConf := &aws.Config{
-		Region: aws.String("us-east-1"),
+		Region: aws.String("us-west-2"),
 		//Endpoint: aws.String(os.Getenv("DYNAMODB_HOST")),
 		Endpoint: aws.String("http://localhost:8000"),
 	}
@@ -65,6 +66,8 @@ func (suite *RepoTestSuite) SetupSuite() {
 	if err := suite.repo.CreateTable(context.Background()); err != nil {
 		suite.T().Fatal("could not create table:", err)
 	}
+
+	suite.ctx = eh.NewContextWithNamespace(context.Background(), "ns")
 }
 
 func (suite *RepoTestSuite) BeforeTest(suiteName, testName string) {
@@ -151,6 +154,10 @@ func (suite *RepoTestSuite) TestSaveAndFindUsingIndex() {
 	}
 	assert.Equal(suite.T(), 2, len(results))
 
+}
+
+func (suite *RepoTestSuite) TearDownAllSuite() {
+	assert.Nil(suite.T(), suite.repo.DeleteTable(context.Background()), "could not delete table")
 }
 
 func (suite *RepoTestSuite) TestRemove() {

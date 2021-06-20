@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/google/uuid"
@@ -136,6 +137,28 @@ func (r *Repo) CreateTable(ctx context.Context) error {
 
 }
 
+func (r *Repo) DeleteTable(ctx context.Context) error {
+	if r.service == nil {
+		return ErrCouldNotDialDB
+	}
+
+	if err := r.service.Table(r.tableName(ctx)).DeleteTable().RunWithContext(ctx); err != nil {
+		if err, ok := err.(awserr.RequestFailure); ok && err.Code() == "ResourceNotFoundException" {
+			return nil
+		}
+		return ErrCouldNotClearDB
+	}
+
+	describeParams := &dynamodb.DescribeTableInput{
+		TableName: aws.String(r.tableName(ctx)),
+	}
+	if err := r.service.Client().WaitUntilTableNotExists(describeParams); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Find implements the Find method of the eventhorizon.ReadRepo interface.
 func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	if r.factoryFn == nil {
@@ -148,6 +171,7 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	table := r.service.Table(r.tableName(ctx))
 	entity := r.factoryFn()
 
+	// TODO support range by adding Get().Range() here
 	err := table.Get("ID", id.String()).Consistent(true).One(entity)
 
 	if err != nil {
